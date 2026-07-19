@@ -1,5 +1,5 @@
 // オフライン対応 Service Worker(アプリ本体をキャッシュ)
-const CACHE = "mc-command-v1";
+const CACHE = "mc-command-v2";
 const ASSETS = [
   "./",
   "./index.html",

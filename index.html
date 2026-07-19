@@ -6,7 +6,7 @@
   <title>マイクラコマンド工房</title>
   <meta name="description" content="やりたいことからマイクラのコマンドを作れる、統合版・Java版対応のコマンドビルダー">
   <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#1c1c24">
+  <meta name="theme-color" content="#b98850">
   <!-- iOS PWA -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -111,6 +111,17 @@
     <button class="tab-btn" data-tab="tab-export"><span class="tab-icon">📦</span>書き出し<span id="cart-badge" class="badge hidden">0</span></button>
     <button class="tab-btn" data-tab="tab-news"><span class="tab-icon">📰</span>ニュース</button>
   </nav>
+
+  <!-- ニュース詳細モーダル -->
+  <div id="news-modal" class="news-modal hidden">
+    <div class="news-modal-panel">
+      <div class="news-modal-head wood-texture">
+        <b id="news-modal-title"></b>
+        <button id="news-modal-close" class="news-modal-close">✕ 閉じる</button>
+      </div>
+      <div id="news-modal-body" class="news-modal-body"></div>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden"></div>
 
