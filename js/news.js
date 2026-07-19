@@ -87,8 +87,13 @@ async function openNewsDetail(entry) {
 
     const note = document.createElement("div");
     note.className = "news-lang-note";
-    note.textContent = "📜 Mojang公式パッチノート(英語)です。「追加(Added / New Features)」「修正(Fixed / Fixes)」などの見出しに注目してみてください。";
+    note.textContent = "📜 Mojang公式パッチノート(英語)です。下のボタンで日本語に翻訳できます(無料の簡易翻訳のため、少し変な日本語になることがあります)。";
     bodyEl.appendChild(note);
+
+    const transBtn = document.createElement("button");
+    transBtn.className = "translate-btn";
+    transBtn.type = "button";
+    bodyEl.appendChild(transBtn);
 
     if (detail.image && detail.image.url) {
       const img = document.createElement("img");
@@ -100,6 +105,7 @@ async function openNewsDetail(entry) {
     }
 
     bodyEl.appendChild(sanitizeHtml(detail.body || "<p>本文がありません。</p>"));
+    setupTranslation(bodyEl, transBtn, entry.id);
     bodyEl.scrollTop = 0;
   } catch (e) {
     bodyEl.innerHTML = '<p class="hint">⚠️ 詳細を読み込めませんでした。通信環境を確認してもう一度試してください。</p>';
@@ -142,11 +148,95 @@ function sanitizeHtml(html) {
     if (!el.children.length) el.remove();
   });
   frag.querySelectorAll("img").forEach(img => {
-    img.addEventListener("error", () => img.remove());
+    img.addEventListener("error", () => {
+      const item = img.closest("li, p");
+      img.remove();
+      if (item && !item.textContent.trim() && !item.querySelector("img")) item.remove();
+    });
   });
   const wrap = document.createElement("div");
   wrap.appendChild(frag);
   return wrap;
+}
+
+// ---------- 日本語翻訳(キー不要の無料翻訳サービスを利用) ----------
+const newsTranslationCache = {}; // entryId → 訳文の配列
+
+function translatableBlocks(bodyEl) {
+  return [...bodyEl.querySelectorAll("p, li, h1, h2, h3, h4")]
+    .filter(el => !el.closest(".news-lang-note") && el.textContent.trim());
+}
+
+async function fetchTranslation(text) {
+  const res = await fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ja&dt=t", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+    body: "q=" + encodeURIComponent(text),
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const data = await res.json();
+  return (data[0] || []).map(seg => (seg && seg[0]) || "").join("");
+}
+
+// 複数ブロックを改行区切りでまとめて翻訳し、行数が一致すれば割り当てる
+async function translateBatch(texts) {
+  const joined = texts.map(t => t.replace(/\s*\n\s*/g, " ")).join("\n");
+  const result = await fetchTranslation(joined);
+  const lines = result.split("\n").map(s => s.trim());
+  if (lines.length === texts.length) return lines;
+  const out = [];
+  for (const t of texts) out.push(await fetchTranslation(t));
+  return out;
+}
+
+function setupTranslation(bodyEl, btn, entryId) {
+  let showingJa = false;
+  const blocks = translatableBlocks(bodyEl);
+  blocks.forEach(el => { el.dataset.origHtml = el.innerHTML; });
+
+  const apply = () => {
+    const cache = newsTranslationCache[entryId];
+    blocks.forEach((el, i) => {
+      if (showingJa && cache && cache[i] != null) el.textContent = cache[i];
+      else el.innerHTML = el.dataset.origHtml;
+    });
+    btn.textContent = showingJa ? "🔤 原文(英語)に戻す" : "🇯🇵 日本語に翻訳する";
+    btn.disabled = false;
+  };
+
+  btn.addEventListener("click", async () => {
+    if (showingJa) { showingJa = false; apply(); return; }
+    if (newsTranslationCache[entryId]) { showingJa = true; apply(); return; }
+
+    btn.disabled = true;
+    btn.textContent = "翻訳中… 0%";
+    try {
+      const texts = blocks.map(el => el.textContent.trim());
+      const translated = new Array(texts.length);
+      let start = 0;
+      while (start < texts.length) {
+        // 約1200文字・最大20ブロックずつまとめて翻訳
+        let end = start, size = 0;
+        while (end < texts.length && size + texts[end].length < 1200 && end - start < 20) {
+          size += texts[end].length + 1;
+          end++;
+        }
+        if (end === start) end = start + 1;
+        const part = await translateBatch(texts.slice(start, end));
+        for (let i = 0; i < part.length; i++) translated[start + i] = part[i];
+        btn.textContent = "翻訳中… " + Math.round((end / texts.length) * 100) + "%";
+        start = end;
+      }
+      newsTranslationCache[entryId] = translated;
+      showingJa = true;
+      apply();
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "⚠️ 翻訳サービスに接続できませんでした(タップで再試行)";
+    }
+  });
+
+  apply();
 }
 
 function renderInfoLinks() {

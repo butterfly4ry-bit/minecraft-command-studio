@@ -290,6 +290,17 @@ main { padding: 14px; max-width: 700px; margin: 0 auto; }
 .news-link small { color: var(--text-dim); display: block; }
 .news-link .arrow { margin-left: auto; color: var(--border-strong); }
 
+/* ============ 翻訳ボタン ============ */
+.translate-btn {
+  width: 100%; margin: 0 0 12px; padding: 11px;
+  border-radius: 12px; font-size: 0.9rem; font-weight: 700;
+  background: linear-gradient(180deg, #6cb54a, var(--accent-dark));
+  border: 2px solid #3c6e24; border-bottom-width: 4px; color: #fff;
+  text-shadow: 0 1px 1px rgba(50, 90, 20, 0.5);
+}
+.translate-btn:disabled { opacity: 0.75; }
+.translate-btn:active { border-bottom-width: 2px; }
+
 /* ============ ニュース詳細モーダル ============ */
 .news-modal {
   position: fixed; inset: 0; z-index: 40;
