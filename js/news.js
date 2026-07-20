@@ -87,7 +87,7 @@ async function openNewsDetail(entry) {
 
     const note = document.createElement("div");
     note.className = "news-lang-note";
-    note.textContent = "📜 Mojang公式パッチノート(英語)です。下のボタンで日本語に翻訳できます(無料の簡易翻訳のため、少し変な日本語になることがあります)。";
+    note.textContent = "📜 Mojang公式パッチノート(英語)です。下のボタンで日本語に翻訳できます(無料の簡易翻訳)。長い記事は数分かかりますが、一度訳せばこの端末に保存されて次からは一瞬です。途中で止まってもボタンを押せば続きから再開します。";
     bodyEl.appendChild(note);
 
     const transBtn = document.createElement("button");
@@ -160,22 +160,114 @@ function sanitizeHtml(html) {
 }
 
 // ---------- 日本語翻訳(キー不要の無料翻訳サービスを利用) ----------
-const newsTranslationCache = {}; // entryId → 訳文の配列
+// 訳文は端末(localStorage)に保存し、一度訳した記事は二度と通信しない
+const newsTranslationCache = (() => {
+  try { return JSON.parse(localStorage.getItem("newsTransStore") || "{}"); }
+  catch (e) { return {}; }
+})();
+
+function saveTransStore() {
+  try {
+    // 新しい8記事分だけ保存(容量対策)
+    const ids = Object.keys(newsTranslationCache)
+      .sort((a, b) => (newsTranslationCache[b].ts || 0) - (newsTranslationCache[a].ts || 0))
+      .slice(0, 8);
+    const slim = {};
+    for (const id of ids) slim[id] = newsTranslationCache[id];
+    localStorage.setItem("newsTransStore", JSON.stringify(slim));
+  } catch (e) { /* 容量オーバー時は保存しない */ }
+}
 
 function translatableBlocks(bodyEl) {
   return [...bodyEl.querySelectorAll("p, li, h1, h2, h3, h4")]
     .filter(el => !el.closest(".news-lang-note") && el.textContent.trim());
 }
 
+// 8秒であきらめて次のサービスに切り替えるfetch
+async function fetchWithTimeout(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 翻訳サービスのリスト。上から順に試し、成功したものを次回も優先する
+const TRANSLATE_PROVIDERS = [
+  {
+    name: "google",
+    async translate(text) {
+      const res = await fetchWithTimeout(
+        "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ja&dt=t&q=" +
+          encodeURIComponent(text)
+      );
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      const out = (data[0] || []).map(seg => (seg && seg[0]) || "").join("");
+      if (!out) throw new Error("empty");
+      return out;
+    },
+  },
+  {
+    name: "lingva",
+    async translate(text) {
+      let lastErr;
+      for (const host of ["lingva.ml", "translate.plausibility.cloud"]) {
+        try {
+          const res = await fetchWithTimeout(
+            `https://${host}/api/v1/en/ja/${encodeURIComponent(text)}`, 25000
+          );
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const data = await res.json();
+          if (data.translation) return data.translation;
+          throw new Error("no translation");
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr;
+    },
+  },
+  {
+    name: "mymemory",
+    async translate(text) {
+      // 1回500文字までの制限があるため、文単位で分割して順に翻訳
+      const chunks = [];
+      let buf = "";
+      for (const line of text.split("\n")) {
+        if ((buf + "\n" + line).length > 450 && buf) { chunks.push(buf); buf = line; }
+        else buf = buf ? buf + "\n" + line : line;
+      }
+      if (buf) chunks.push(buf);
+      const out = [];
+      for (const c of chunks) {
+        const res = await fetchWithTimeout(
+          "https://api.mymemory.translated.net/get?langpair=en%7Cja&q=" + encodeURIComponent(c)
+        );
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        const t = data.responseData && data.responseData.translatedText;
+        if (!t || data.responseStatus !== 200) throw new Error("mymemory error");
+        out.push(t);
+      }
+      return out.join("\n");
+    },
+  },
+];
+
+let preferredProvider = 0; // 前回成功したサービスを覚えておく
+
 async function fetchTranslation(text) {
-  const res = await fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ja&dt=t", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-    body: "q=" + encodeURIComponent(text),
-  });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  const data = await res.json();
-  return (data[0] || []).map(seg => (seg && seg[0]) || "").join("");
+  let lastErr;
+  for (let i = 0; i < TRANSLATE_PROVIDERS.length; i++) {
+    const idx = (preferredProvider + i) % TRANSLATE_PROVIDERS.length;
+    try {
+      const result = await TRANSLATE_PROVIDERS[idx].translate(text);
+      preferredProvider = idx;
+      return result;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
 }
 
 // 複数ブロックを改行区切りでまとめて翻訳し、行数が一致すれば割り当てる
@@ -194,10 +286,14 @@ function setupTranslation(bodyEl, btn, entryId) {
   const blocks = translatableBlocks(bodyEl);
   blocks.forEach(el => { el.dataset.origHtml = el.innerHTML; });
 
+  // 訳文と進み具合を記事ごとに保持(失敗しても途中から再開できる)
+  const state = newsTranslationCache[entryId] ||
+    (newsTranslationCache[entryId] = { arr: [], done: 0, complete: false });
+  state.ts = Date.now();
+
   const apply = () => {
-    const cache = newsTranslationCache[entryId];
     blocks.forEach((el, i) => {
-      if (showingJa && cache && cache[i] != null) el.textContent = cache[i];
+      if (showingJa && state.arr[i] != null) el.textContent = state.arr[i];
       else el.innerHTML = el.dataset.origHtml;
     });
     btn.textContent = showingJa ? "🔤 原文(英語)に戻す" : "🇯🇵 日本語に翻訳する";
@@ -206,33 +302,77 @@ function setupTranslation(bodyEl, btn, entryId) {
 
   btn.addEventListener("click", async () => {
     if (showingJa) { showingJa = false; apply(); return; }
-    if (newsTranslationCache[entryId]) { showingJa = true; apply(); return; }
+    if (state.complete) { showingJa = true; apply(); return; }
 
     btn.disabled = true;
-    btn.textContent = "翻訳中… 0%";
+    const texts = blocks.map(el => el.textContent.trim());
+    btn.textContent = "翻訳中… " + Math.round((state.done / texts.length) * 100) + "%";
     try {
-      const texts = blocks.map(el => el.textContent.trim());
-      const translated = new Array(texts.length);
-      let start = 0;
-      while (start < texts.length) {
-        // 約1200文字・最大20ブロックずつまとめて翻訳
-        let end = start, size = 0;
-        while (end < texts.length && size + texts[end].length < 1200 && end - start < 20) {
+      // 約1200文字・最大25ブロックずつのまとまりに分割
+      const batches = [];
+      let s = state.done;
+      while (s < texts.length) {
+        let end = s, size = 0;
+        while (end < texts.length && size + texts[end].length < 1200 && end - s < 25) {
           size += texts[end].length + 1;
           end++;
         }
-        if (end === start) end = start + 1;
-        const part = await translateBatch(texts.slice(start, end));
-        for (let i = 0; i < part.length; i++) translated[start + i] = part[i];
-        btn.textContent = "翻訳中… " + Math.round((end / texts.length) * 100) + "%";
-        start = end;
+        if (end === s) end = s + 1;
+        batches.push([s, end]);
+        s = end;
       }
-      newsTranslationCache[entryId] = translated;
+
+      // 3並列で翻訳し、先頭から順に確定させていく(途中失敗でも再開可能)
+      const results = new Array(batches.length);
+      let nextBatch = 0;
+      let confirmed = 0;
+      let failed = false;
+      const worker = async () => {
+        while (!failed) {
+          const i = nextBatch++;
+          if (i >= batches.length) return;
+          const [a, b] = batches[i];
+          // 失敗したら間隔を空けながら最大3回試す(流量制限対策)
+          let ok = false, lastErr;
+          for (const waitMs of [0, 2500, 7000]) {
+            if (waitMs) await new Promise(r => setTimeout(r, waitMs));
+            try {
+              results[i] = await translateBatch(texts.slice(a, b));
+              ok = true;
+              break;
+            } catch (e) { lastErr = e; }
+          }
+          if (!ok) {
+            failed = true;
+            throw lastErr;
+          }
+          // サービスに負荷をかけないよう、次のまとまりまで少し待つ
+          await new Promise(r => setTimeout(r, 700));
+          while (confirmed < batches.length && results[confirmed]) {
+            const [ca, cb] = batches[confirmed];
+            for (let k = 0; k < results[confirmed].length; k++) state.arr[ca + k] = results[confirmed][k];
+            state.done = cb;
+            confirmed++;
+          }
+          btn.textContent = "翻訳中… " + Math.round((state.done / texts.length) * 100) + "%";
+        }
+      };
+      // 流量制限を避けるため1本ずつ順番に処理
+      await worker();
+
+      state.complete = true;
+      saveTransStore();
       showingJa = true;
       apply();
     } catch (e) {
-      btn.disabled = false;
-      btn.textContent = "⚠️ 翻訳サービスに接続できませんでした(タップで再試行)";
+      // 途中まで訳せた分は表示・保存し、続きから再開できるようにする
+      saveTransStore();
+      showingJa = state.done > 0;
+      apply();
+      btn.textContent = state.done > 0
+        ? "⚠️ 途中で止まりました(タップで続きから再開)"
+        : "⚠️ 翻訳サービスに接続できませんでした(タップで再試行)";
+      if (showingJa) showingJa = false; // 次のタップで再開処理に入るよう戻す
     }
   });
 
